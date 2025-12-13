@@ -1,134 +1,126 @@
 //-----------------------------------------------------------------------------
 // Module: switch_4port
-// Description: 4-port packet switch fabric with round-robin arbitration
-//              and per-output FIFOs to prevent packet drops under contention.
+// Description: 4-port packet switch fabric with:
+//   - switch_port FSMs per input
+//   - per-input FIFOs (ingress buffering only)
+//   - per-output round-robin arbiters
+//   - direct (no-FIFO) outputs
 //
-// Architecture:
-//   Input Ports ? switch_port FSMs ? Arbiter ? FIFO (per output) ? Output Ports
+// Multicast / broadcast support:
+//   A packet can have multiple target bits set. For each input i we track
+//   which outputs have already been served using pkt_written[i][j].
+//   The packet is considered "done" when all requested outputs were served,
+//   then we pop the next packet from that input's FIFO.
 //
-// Key feature: When multiple inputs target the same output, the arbiter grants
-// one per cycle. The granted packet is pushed into that output's FIFO.
-// Packets are then popped from FIFOs one at a time to the output interface.
-// This ensures no drops due to contention (unless FIFO overflows).
+// Packet format in FIFOs and internal datapath:
+//   {source[3:0], target[3:0], data[7:0]} = 16 bits
 //-----------------------------------------------------------------------------
 
-//notes-----------------------------------------------------------------
-// 1. need to enable handlinf of invalid request target, drop the packed if it's
-//    invalid, a packet is invalid if ti[i]=1 for any i, if &ti==0.
-//    if yes drop the packet by vi=0
-
-
 module switch_4port #(
-  parameter int NUM_PORTS = 4,
-  parameter int DATA_WIDTH = 8,
-  parameter int FIFO_DEPTH = 8    // Depth of per-output FIFOs
+  parameter int NUM_PORTS   = 4,
+  parameter int DATA_WIDTH  = 8,
+  parameter int FIFO_DEPTH  = 8   // Depth of per-input FIFOs
 )(
-  input  logic clk,
-  input  logic rst_n,
-  port_if port0,
-  port_if port1,
-  port_if port2,
-  port_if port3
+  input  logic  clk,
+  input  logic  rst_n,
+  port_if       port0,
+  port_if       port1,
+  port_if       port2,
+  port_if       port3
 );
 
   //-------------------------------------------------------------------------
   // Local Parameters
   //-------------------------------------------------------------------------
-  
+
   // Source port encodings (one-hot)
   localparam logic [3:0] PORT0_SOURCE = 4'b0001;
   localparam logic [3:0] PORT1_SOURCE = 4'b0010;
   localparam logic [3:0] PORT2_SOURCE = 4'b0100;
   localparam logic [3:0] PORT3_SOURCE = 4'b1000;
-  
+
   // Broadcast target
   localparam logic [3:0] BROADCAST_TARGET = 4'b1111;
-  
+
   // FIFO data width: {source[3:0], target[3:0], data[7:0]} = 16 bits
   localparam int FIFO_DATA_WIDTH = 16;
-  
-  //-------------------------------------------------------------------------
-  // Internal Wires from switch_port instances
-  //-------------------------------------------------------------------------
-  
-  // Valid signals from each switch_port
-  logic v0, v1, v2, v3;
-  
-  // Source signals from each switch_port
-  logic [3:0] s0, s1, s2, s3;
-  
-  // Target signals from each switch_port
-  logic [3:0] t0, t1, t2, t3;
-  
-  // Data signals from each switch_port
-  logic [7:0] d0, d1, d2, d3;
 
-  // Filtered/validated valid signals: consider a packet invalid and drop it
-  // if its target vector has no bits set. "Drop" here means the packet
-  // will not generate requests or be written to any FIFO.
-  logic v0_valid, v1_valid, v2_valid, v3_valid;
-  
-  // Request vectors for each output port
-  logic [3:0] req0, req1, req2, req3;
-  
-  // Grant signals from arbiters (index of winning input)
-  logic [1:0] grant0, grant1, grant2, grant3;
-  
   //-------------------------------------------------------------------------
-  // FIFO Signals (one FIFO per output port)
-  // Packet format in FIFO: {source[3:0], target[3:0], data[7:0]}
+  // Outputs of switch_port instances
   //-------------------------------------------------------------------------
-  
-  // FIFO 0 (feeds port0 output)
-  logic                       fifo0_wr_en;
-  logic [FIFO_DATA_WIDTH-1:0] fifo0_wr_data;
-  logic                       fifo0_rd_en;
-  logic [FIFO_DATA_WIDTH-1:0] fifo0_rd_data;
-  logic                       fifo0_full;
-  logic                       fifo0_empty;
-  
-  // FIFO 1 (feeds port1 output)
-  logic                       fifo1_wr_en;
-  logic [FIFO_DATA_WIDTH-1:0] fifo1_wr_data;
-  logic                       fifo1_rd_en;
-  logic [FIFO_DATA_WIDTH-1:0] fifo1_rd_data;
-  logic                       fifo1_full;
-  logic                       fifo1_empty;
-  
-  // FIFO 2 (feeds port2 output)
-  logic                       fifo2_wr_en;
-  logic [FIFO_DATA_WIDTH-1:0] fifo2_wr_data;
-  logic                       fifo2_rd_en;
-  logic [FIFO_DATA_WIDTH-1:0] fifo2_rd_data;
-  logic                       fifo2_full;
-  logic                       fifo2_empty;
-  
-  // FIFO 3 (feeds port3 output)
-  logic                       fifo3_wr_en;
-  logic [FIFO_DATA_WIDTH-1:0] fifo3_wr_data;
-  logic                       fifo3_rd_en;
-  logic [FIFO_DATA_WIDTH-1:0] fifo3_rd_data;
-  logic                       fifo3_full;
-  logic                       fifo3_empty;
-  
+
+  logic        v0, v1, v2, v3;
+  logic [3:0]  s0, s1, s2, s3;
+  logic [3:0]  t0, t1, t2, t3;
+  logic [7:0]  d0, d1, d2, d3;
+
   //-------------------------------------------------------------------------
-  // Helper: Extract fields from FIFO data
-  // Format: {source[15:12], target[11:8], data[7:0]}
+  // Input FIFOs (one per input port)
   //-------------------------------------------------------------------------
-  
+
+  // Write side
+  logic                       in_fifo0_wr_en, in_fifo1_wr_en;
+  logic                       in_fifo2_wr_en, in_fifo3_wr_en;
+  logic [FIFO_DATA_WIDTH-1:0] in_fifo0_wr_data, in_fifo1_wr_data;
+  logic [FIFO_DATA_WIDTH-1:0] in_fifo2_wr_data, in_fifo3_wr_data;
+
+  // Read side
+  logic                       in_fifo0_rd_en, in_fifo1_rd_en;
+  logic                       in_fifo2_rd_en, in_fifo3_rd_en;
+  logic [FIFO_DATA_WIDTH-1:0] in_fifo0_rd_data, in_fifo1_rd_data;
+  logic [FIFO_DATA_WIDTH-1:0] in_fifo2_rd_data, in_fifo3_rd_data;
+
+  // Status
+  logic in_fifo0_full,  in_fifo1_full,  in_fifo2_full,  in_fifo3_full;
+  logic in_fifo0_empty, in_fifo1_empty, in_fifo2_empty, in_fifo3_empty;
+
+  //-------------------------------------------------------------------------
+  // Latched packet state per input (one "current packet" per input)
+  //-------------------------------------------------------------------------
+
+  logic [3:0] pkt_src    [NUM_PORTS]; // [input][3:0]
+  logic [3:0] pkt_tgt    [NUM_PORTS];
+  logic [7:0] pkt_data   [NUM_PORTS];
+  logic       pkt_valid  [NUM_PORTS]; // This input currently has an active pkt
+
+  // For each input i and output j, bit = 1 means "already sent to output j"
+  logic [3:0] pkt_written     [NUM_PORTS];
+  logic [3:0] pkt_written_next[NUM_PORTS];
+
+  // Packet "done" flag per input
+  logic pkt_done[NUM_PORTS];
+
+  //-------------------------------------------------------------------------
+  // Request vectors and grants (per output)
+  // reqX[i] = input i requests output X
+  //-------------------------------------------------------------------------
+
+  logic [NUM_PORTS-1:0] req0, req1, req2, req3;
+  logic [1:0]           grant0, grant1, grant2, grant3;
+
+  //-------------------------------------------------------------------------
+  // Output mux signals (no output FIFOs)
+  //-------------------------------------------------------------------------
+
+  logic                       out0_valid, out1_valid, out2_valid, out3_valid;
+  logic [FIFO_DATA_WIDTH-1:0] out0_data,  out1_data,  out2_data,  out3_data;
+
+  //-------------------------------------------------------------------------
+  // Helper: Pack/unpack FIFO data
+  //-------------------------------------------------------------------------
+
   function automatic logic [3:0] get_source(input logic [FIFO_DATA_WIDTH-1:0] fifo_data);
 	return fifo_data[15:12];
   endfunction
-  
+
   function automatic logic [3:0] get_target(input logic [FIFO_DATA_WIDTH-1:0] fifo_data);
 	return fifo_data[11:8];
   endfunction
-  
+
   function automatic logic [7:0] get_data(input logic [FIFO_DATA_WIDTH-1:0] fifo_data);
 	return fifo_data[7:0];
   endfunction
-  
-  // Helper: Pack fields into FIFO data format
+
   function automatic logic [FIFO_DATA_WIDTH-1:0] pack_packet(
 	input logic [3:0] source,
 	input logic [3:0] target,
@@ -138,13 +130,9 @@ module switch_4port #(
   endfunction
 
   //-------------------------------------------------------------------------
-  // Local validation helpers
-  // - `is_one_hot_local` checks that `source` is a valid one-hot encoding
-  // - `packet_is_valid` implements the rule: original `v` must be set,
-  //    `source` must be one-hot, target must be non-zero, and the packet
-  //    must not target its own source unless the target is a broadcast
-  //    (all ones).
+  // Validation helpers (used at ingress)
   //-------------------------------------------------------------------------
+
   function automatic logic is_one_hot_local(input logic [3:0] value);
 	int count;
 	count = 0;
@@ -155,36 +143,22 @@ module switch_4port #(
   endfunction
 
   function automatic logic packet_is_valid(
-	input logic        v_in,
-	input logic [3:0]  src,
-	input logic [3:0]  tgt
+	input logic       v_in,
+	input logic [3:0] src,
+	input logic [3:0] tgt
   );
 	// require original valid, a well-defined one-hot source, non-empty target,
 	// and either the target is broadcast or it does not include the source bit
-	return v_in && is_one_hot_local(src) && (|tgt) && ((tgt == BROADCAST_TARGET) || !(|(tgt & src)));
+	return v_in
+		&& is_one_hot_local(src)
+		&& (|tgt)
+		&& ((tgt == BROADCAST_TARGET) || !(|(tgt & src)));
   endfunction
 
-  // Function to check if source is one-hot encoded
-  function automatic logic is_one_hot(input logic [3:0] value);
-	int count;
-	count = 0;
-	for (int i = 0; i < NUM_PORTS; i++) begin
-	  if (value[i]) count++;
-	end
-	return (count == 1);
-  endfunction
-  
   //-------------------------------------------------------------------------
-  // Round-Robin Arbiter Module (defined inline)
+  // Instantiate switch_port modules
   //-------------------------------------------------------------------------
-  
-  // Round-robin arbiter for fair arbitration among requesters
-  // Uses a rotating priority pointer to ensure fairness
-  
-  //-------------------------------------------------------------------------
-  // Instantiate 4 switch_port modules
-  //-------------------------------------------------------------------------
-  
+
   switch_port #(.NUM_PORTS(NUM_PORTS)) sp0 (
 	.clk       (clk),
 	.rst_n     (rst_n),
@@ -197,7 +171,7 @@ module switch_4port #(
 	.target_out(t0),
 	.data_out  (d0)
   );
-  
+
   switch_port #(.NUM_PORTS(NUM_PORTS)) sp1 (
 	.clk       (clk),
 	.rst_n     (rst_n),
@@ -210,7 +184,7 @@ module switch_4port #(
 	.target_out(t1),
 	.data_out  (d1)
   );
-  
+
   switch_port #(.NUM_PORTS(NUM_PORTS)) sp2 (
 	.clk       (clk),
 	.rst_n     (rst_n),
@@ -223,7 +197,7 @@ module switch_4port #(
 	.target_out(t2),
 	.data_out  (d2)
   );
-  
+
   switch_port #(.NUM_PORTS(NUM_PORTS)) sp3 (
 	.clk       (clk),
 	.rst_n     (rst_n),
@@ -236,375 +210,455 @@ module switch_4port #(
 	.target_out(t3),
 	.data_out  (d3)
   );
-  
-  //-------------------------------------------------------------------------
-  // Request Vector Generation
-  // For each output port j, reqj[i] = input i wants to send to output j
-  //-------------------------------------------------------------------------
-  
-  
-  
-  always_comb begin
-	// Compute filtered valid signals using helper function
-	v0_valid = packet_is_valid(v0, s0, t0);
-	v1_valid = packet_is_valid(v1, s1, t1);
-	v2_valid = packet_is_valid(v2, s2, t2);
-	v3_valid = packet_is_valid(v3, s3, t3);
 
-	// Request for output port 0
-	req0[0] = v0_valid && t0[0];
-	req0[1] = v1_valid && t1[0];
-	req0[2] = v2_valid && t2[0];
-	req0[3] = v3_valid && t3[0];
-	
-	// Request for output port 1 (use filtered valids)
-	req1[0] = v0_valid && t0[1];
-	req1[1] = v1_valid && t1[1];
-	req1[2] = v2_valid && t2[1];
-	req1[3] = v3_valid && t3[1];
-	
-	// Request for output port 2 (use filtered valids)
-	req2[0] = v0_valid && t0[2];
-	req2[1] = v1_valid && t1[2];
-	req2[2] = v2_valid && t2[2];
-	req2[3] = v3_valid && t3[2];
-	
-	// Request for output port 3 (use filtered valids)
-	req3[0] = v0_valid && t0[3];
-	req3[1] = v1_valid && t1[3];
-	req3[2] = v2_valid && t2[3];
-	req3[3] = v3_valid && t3[3];
+  //-------------------------------------------------------------------------
+  // Input FIFO instances
+  //-------------------------------------------------------------------------
+
+  sync_fifo #(
+	.DATA_WIDTH(FIFO_DATA_WIDTH),
+	.DEPTH     (FIFO_DEPTH)
+  ) in_fifo0 (
+	.clk    (clk),
+	.rst_n  (rst_n),
+	.wr_en  (in_fifo0_wr_en),
+	.wr_data(in_fifo0_wr_data),
+	.rd_en  (in_fifo0_rd_en),
+	.rd_data(in_fifo0_rd_data),
+	.full   (in_fifo0_full),
+	.empty  (in_fifo0_empty)
+  );
+
+  sync_fifo #(
+	.DATA_WIDTH(FIFO_DATA_WIDTH),
+	.DEPTH     (FIFO_DEPTH)
+  ) in_fifo1 (
+	.clk    (clk),
+	.rst_n  (rst_n),
+	.wr_en  (in_fifo1_wr_en),
+	.wr_data(in_fifo1_wr_data),
+	.rd_en  (in_fifo1_rd_en),
+	.rd_data(in_fifo1_rd_data),
+	.full   (in_fifo1_full),
+	.empty  (in_fifo1_empty)
+  );
+
+  sync_fifo #(
+	.DATA_WIDTH(FIFO_DATA_WIDTH),
+	.DEPTH     (FIFO_DEPTH)
+  ) in_fifo2 (
+	.clk    (clk),
+	.rst_n  (rst_n),
+	.wr_en  (in_fifo2_wr_en),
+	.wr_data(in_fifo2_wr_data),
+	.rd_en  (in_fifo2_rd_en),
+	.rd_data(in_fifo2_rd_data),
+	.full   (in_fifo2_full),
+	.empty  (in_fifo2_empty)
+  );
+
+  sync_fifo #(
+	.DATA_WIDTH(FIFO_DATA_WIDTH),
+	.DEPTH     (FIFO_DEPTH)
+  ) in_fifo3 (
+	.clk    (clk),
+	.rst_n  (rst_n),
+	.wr_en  (in_fifo3_wr_en),
+	.wr_data(in_fifo3_wr_data),
+	.rd_en  (in_fifo3_rd_en),
+	.rd_data(in_fifo3_rd_data),
+	.full   (in_fifo3_full),
+	.empty  (in_fifo3_empty)
+  );
+
+  //-------------------------------------------------------------------------
+  // Ingress validation + write to input FIFOs
+  //-------------------------------------------------------------------------
+
+  logic v0_ok, v1_ok, v2_ok, v3_ok;
+
+  assign v0_ok = packet_is_valid(v0, s0, t0);
+  assign v1_ok = packet_is_valid(v1, s1, t1);
+  assign v2_ok = packet_is_valid(v2, s2, t2);
+  assign v3_ok = packet_is_valid(v3, s3, t3);
+
+  assign in_fifo0_wr_en   = v0_ok && !in_fifo0_full;
+  assign in_fifo0_wr_data = pack_packet(s0, t0, d0);
+
+  assign in_fifo1_wr_en   = v1_ok && !in_fifo1_full;
+  assign in_fifo1_wr_data = pack_packet(s1, t1, d1);
+
+  assign in_fifo2_wr_en   = v2_ok && !in_fifo2_full;
+  assign in_fifo2_wr_data = pack_packet(s2, t2, d2);
+
+  assign in_fifo3_wr_en   = v3_ok && !in_fifo3_full;
+  assign in_fifo3_wr_data = pack_packet(s3, t3, d3);
+
+  //-------------------------------------------------------------------------
+  // Packet done condition per input:
+  // pkt_done[i] = pkt_valid && no remaining target bits that are not written
+  //-------------------------------------------------------------------------
+
+  always_comb begin
+	for (int i = 0; i < NUM_PORTS; i++) begin
+	  pkt_done[i] = pkt_valid[i] &&
+					((pkt_tgt[i] & ~pkt_written[i]) == 4'b0000);
+	end
   end
-  
+
   //-------------------------------------------------------------------------
-  // Round-Robin Arbiter Instances
+  // Compute next pkt_written (set bits for outputs served this cycle)
   //-------------------------------------------------------------------------
-  
+
+  always_comb begin
+	// start with current value
+	for (int i = 0; i < NUM_PORTS; i++) begin
+	  pkt_written_next[i] = pkt_written[i];
+	end
+
+	// For each output j, if we actually send a packet (outj_valid),
+	// grantj is the input index for that packet, and bit j is now served.
+	if (out0_valid) pkt_written_next[grant0][0] = 1'b1;
+	if (out1_valid) pkt_written_next[grant1][1] = 1'b1;
+	if (out2_valid) pkt_written_next[grant2][2] = 1'b1;
+	if (out3_valid) pkt_written_next[grant3][3] = 1'b1;
+  end
+
+  //-------------------------------------------------------------------------
+  // Input FIFO read + packet latching
+  //-------------------------------------------------------------------------
+
+  assign in_fifo0_rd_en = (!pkt_valid[0] || pkt_done[0]) && !in_fifo0_empty;
+  assign in_fifo1_rd_en = (!pkt_valid[1] || pkt_done[1]) && !in_fifo1_empty;
+  assign in_fifo2_rd_en = (!pkt_valid[2] || pkt_done[2]) && !in_fifo2_empty;
+  assign in_fifo3_rd_en = (!pkt_valid[3] || pkt_done[3]) && !in_fifo3_empty;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+	if (!rst_n) begin
+	  for (int i = 0; i < NUM_PORTS; i++) begin
+		pkt_valid[i]   <= 1'b0;
+		pkt_src[i]     <= '0;
+		pkt_tgt[i]     <= '0;
+		pkt_data[i]    <= '0;
+		pkt_written[i] <= '0;
+	  end
+	end else begin
+	  // Input 0
+	  if (!pkt_valid[0] || pkt_done[0]) begin
+		if (!in_fifo0_empty) begin
+		  pkt_valid[0]   <= 1'b1;
+		  pkt_src[0]     <= get_source(in_fifo0_rd_data);
+		  pkt_tgt[0]     <= get_target(in_fifo0_rd_data);
+		  pkt_data[0]    <= get_data(in_fifo0_rd_data);
+		  pkt_written[0] <= 4'b0000;
+		end else begin
+		  pkt_valid[0]   <= 1'b0;
+		  pkt_written[0] <= 4'b0000;
+		end
+	  end else begin
+		pkt_written[0] <= pkt_written_next[0];
+	  end
+
+	  // Input 1
+	  if (!pkt_valid[1] || pkt_done[1]) begin
+		if (!in_fifo1_empty) begin
+		  pkt_valid[1]   <= 1'b1;
+		  pkt_src[1]     <= get_source(in_fifo1_rd_data);
+		  pkt_tgt[1]     <= get_target(in_fifo1_rd_data);
+		  pkt_data[1]    <= get_data(in_fifo1_rd_data);
+		  pkt_written[1] <= 4'b0000;
+		end else begin
+		  pkt_valid[1]   <= 1'b0;
+		  pkt_written[1] <= 4'b0000;
+		end
+	  end else begin
+		pkt_written[1] <= pkt_written_next[1];
+	  end
+
+	  // Input 2
+	  if (!pkt_valid[2] || pkt_done[2]) begin
+		if (!in_fifo2_empty) begin
+		  pkt_valid[2]   <= 1'b1;
+		  pkt_src[2]     <= get_source(in_fifo2_rd_data);
+		  pkt_tgt[2]     <= get_target(in_fifo2_rd_data);
+		  pkt_data[2]    <= get_data(in_fifo2_rd_data);
+		  pkt_written[2] <= 4'b0000;
+		end else begin
+		  pkt_valid[2]   <= 1'b0;
+		  pkt_written[2] <= 4'b0000;
+		end
+	  end else begin
+		pkt_written[2] <= pkt_written_next[2];
+	  end
+
+	  // Input 3
+	  if (!pkt_valid[3] || pkt_done[3]) begin
+		if (!in_fifo3_empty) begin
+		  pkt_valid[3]   <= 1'b1;
+		  pkt_src[3]     <= get_source(in_fifo3_rd_data);
+		  pkt_tgt[3]     <= get_target(in_fifo3_rd_data);
+		  pkt_data[3]    <= get_data(in_fifo3_rd_data);
+		  pkt_written[3] <= 4'b0000;
+		end else begin
+		  pkt_valid[3]   <= 1'b0;
+		  pkt_written[3] <= 4'b0000;
+		end
+	  end else begin
+		pkt_written[3] <= pkt_written_next[3];
+	  end
+	end
+  end
+
+  //-------------------------------------------------------------------------
+  // Request vector generation (from latched packets)
+  //-------------------------------------------------------------------------
+
+  always_comb begin
+	// output 0
+	req0[0] = pkt_valid[0] && pkt_tgt[0][0] && !pkt_written[0][0];
+	req0[1] = pkt_valid[1] && pkt_tgt[1][0] && !pkt_written[1][0];
+	req0[2] = pkt_valid[2] && pkt_tgt[2][0] && !pkt_written[2][0];
+	req0[3] = pkt_valid[3] && pkt_tgt[3][0] && !pkt_written[3][0];
+
+	// output 1
+	req1[0] = pkt_valid[0] && pkt_tgt[0][1] && !pkt_written[0][1];
+	req1[1] = pkt_valid[1] && pkt_tgt[1][1] && !pkt_written[1][1];
+	req1[2] = pkt_valid[2] && pkt_tgt[2][1] && !pkt_written[2][1];
+	req1[3] = pkt_valid[3] && pkt_tgt[3][1] && !pkt_written[3][1];
+
+	// output 2
+	req2[0] = pkt_valid[0] && pkt_tgt[0][2] && !pkt_written[0][2];
+	req2[1] = pkt_valid[1] && pkt_tgt[1][2] && !pkt_written[1][2];
+	req2[2] = pkt_valid[2] && pkt_tgt[2][2] && !pkt_written[2][2];
+	req2[3] = pkt_valid[3] && pkt_tgt[3][2] && !pkt_written[3][2];
+
+	// output 3
+	req3[0] = pkt_valid[0] && pkt_tgt[0][3] && !pkt_written[0][3];
+	req3[1] = pkt_valid[1] && pkt_tgt[1][3] && !pkt_written[1][3];
+	req3[2] = pkt_valid[2] && pkt_tgt[2][3] && !pkt_written[2][3];
+	req3[3] = pkt_valid[3] && pkt_tgt[3][3] && !pkt_written[3][3];
+  end
+
+  //-------------------------------------------------------------------------
+  // Round-robin arbiters (per output)
+  //-------------------------------------------------------------------------
+
   rr_arbiter arb0 (
 	.clk   (clk),
 	.rst_n (rst_n),
 	.req   (req0),
 	.grant (grant0)
   );
-  
+
   rr_arbiter arb1 (
 	.clk   (clk),
 	.rst_n (rst_n),
 	.req   (req1),
 	.grant (grant1)
   );
-  
+
   rr_arbiter arb2 (
 	.clk   (clk),
 	.rst_n (rst_n),
 	.req   (req2),
 	.grant (grant2)
   );
-  
+
   rr_arbiter arb3 (
 	.clk   (clk),
 	.rst_n (rst_n),
 	.req   (req3),
 	.grant (grant3)
   );
-  
+
   //-------------------------------------------------------------------------
-  // Per-Output FIFO Instances
-  // Each FIFO buffers packets destined for that output port.
-  // This prevents drops when multiple inputs target the same output.
+  // Output muxes (no output FIFOs)
   //-------------------------------------------------------------------------
-  
-  sync_fifo #(
-	.DATA_WIDTH(FIFO_DATA_WIDTH),
-	.DEPTH     (FIFO_DEPTH)
-  ) fifo0 (
-	.clk    (clk),
-	.rst_n  (rst_n),
-	.wr_en  (fifo0_wr_en),
-	.wr_data(fifo0_wr_data),
-	.rd_en  (fifo0_rd_en),
-	.rd_data(fifo0_rd_data),
-	.full   (fifo0_full),
-	.empty  (fifo0_empty)
-  );
-  
-  sync_fifo #(
-	.DATA_WIDTH(FIFO_DATA_WIDTH),
-	.DEPTH     (FIFO_DEPTH)
-  ) fifo1 (
-	.clk    (clk),
-	.rst_n  (rst_n),
-	.wr_en  (fifo1_wr_en),
-	.wr_data(fifo1_wr_data),
-	.rd_en  (fifo1_rd_en),
-	.rd_data(fifo1_rd_data),
-	.full   (fifo1_full),
-	.empty  (fifo1_empty)
-  );
-  
-  sync_fifo #(
-	.DATA_WIDTH(FIFO_DATA_WIDTH),
-	.DEPTH     (FIFO_DEPTH)
-  ) fifo2 (
-	.clk    (clk),
-	.rst_n  (rst_n),
-	.wr_en  (fifo2_wr_en),
-	.wr_data(fifo2_wr_data),
-	.rd_en  (fifo2_rd_en),
-	.rd_data(fifo2_rd_data),
-	.full   (fifo2_full),
-	.empty  (fifo2_empty)
-  );
-  
-  sync_fifo #(
-	.DATA_WIDTH(FIFO_DATA_WIDTH),
-	.DEPTH     (FIFO_DEPTH)
-  ) fifo3 (
-	.clk    (clk),
-	.rst_n  (rst_n),
-	.wr_en  (fifo3_wr_en),
-	.wr_data(fifo3_wr_data),
-	.rd_en  (fifo3_rd_en),
-	.rd_data(fifo3_rd_data),
-	.full   (fifo3_full),
-	.empty  (fifo3_empty)
-  );
-  
-  //-------------------------------------------------------------------------
-  // FIFO Write Logic (Arbiter ? FIFO)
-  // For each output, the arbiter selects which input wins.
-  // The winning packet is written to the FIFO (if not full).
-  //-------------------------------------------------------------------------
-  
-  // FIFO 0 write logic
+
   always_comb begin
-	fifo0_wr_en   = 1'b0;
-	fifo0_wr_data = '0;
-	
-	if (!fifo0_full) begin
-	  case (grant0)
-		2'd0: if (v0_valid && t0[0]) begin
-		  fifo0_wr_en   = 1'b1;
-		  fifo0_wr_data = pack_packet(s0, t0, d0);
-		end
-		2'd1: if (v1_valid && t1[0]) begin
-		  fifo0_wr_en   = 1'b1;
-		  fifo0_wr_data = pack_packet(s1, t1, d1);
-		end
-		2'd2: if (v2_valid && t2[0]) begin
-		  fifo0_wr_en   = 1'b1;
-		  fifo0_wr_data = pack_packet(s2, t2, d2);
-		end
-		2'd3: if (v3_valid && t3[0]) begin
-		  fifo0_wr_en   = 1'b1;
-		  fifo0_wr_data = pack_packet(s3, t3, d3);
-		end
-	  endcase
-	end
+	out0_valid = 1'b0;
+	out0_data  = '0;
+	unique case (grant0)
+	  2'd0: if (req0[0]) begin
+		out0_valid = 1'b1;
+		out0_data  = pack_packet(pkt_src[0], pkt_tgt[0], pkt_data[0]);
+	  end
+	  2'd1: if (req0[1]) begin
+		out0_valid = 1'b1;
+		out0_data  = pack_packet(pkt_src[1], pkt_tgt[1], pkt_data[1]);
+	  end
+	  2'd2: if (req0[2]) begin
+		out0_valid = 1'b1;
+		out0_data  = pack_packet(pkt_src[2], pkt_tgt[2], pkt_data[2]);
+	  end
+	  2'd3: if (req0[3]) begin
+		out0_valid = 1'b1;
+		out0_data  = pack_packet(pkt_src[3], pkt_tgt[3], pkt_data[3]);
+	  end
+	endcase
   end
-  
-  // FIFO 1 write logic
+
   always_comb begin
-	fifo1_wr_en   = 1'b0;
-	fifo1_wr_data = '0;
-	
-	if (!fifo1_full) begin
-	  case (grant1)
-		2'd0: if (v0_valid && t0[1]) begin
-		  fifo1_wr_en   = 1'b1;
-		  fifo1_wr_data = pack_packet(s0, t0, d0);
-		end
-		2'd1: if (v1_valid && t1[1]) begin
-		  fifo1_wr_en   = 1'b1;
-		  fifo1_wr_data = pack_packet(s1, t1, d1);
-		end
-		2'd2: if (v2_valid && t2[1]) begin
-		  fifo1_wr_en   = 1'b1;
-		  fifo1_wr_data = pack_packet(s2, t2, d2);
-		end
-		2'd3: if (v3_valid && t3[1]) begin
-		  fifo1_wr_en   = 1'b1;
-		  fifo1_wr_data = pack_packet(s3, t3, d3);
-		end
-	  endcase
-	end
+	out1_valid = 1'b0;
+	out1_data  = '0;
+	unique case (grant1)
+	  2'd0: if (req1[0]) begin
+		out1_valid = 1'b1;
+		out1_data  = pack_packet(pkt_src[0], pkt_tgt[0], pkt_data[0]);
+	  end
+	  2'd1: if (req1[1]) begin
+		out1_valid = 1'b1;
+		out1_data  = pack_packet(pkt_src[1], pkt_tgt[1], pkt_data[1]);
+	  end
+	  2'd2: if (req1[2]) begin
+		out1_valid = 1'b1;
+		out1_data  = pack_packet(pkt_src[2], pkt_tgt[2], pkt_data[2]);
+	  end
+	  2'd3: if (req1[3]) begin
+		out1_valid = 1'b1;
+		out1_data  = pack_packet(pkt_src[3], pkt_tgt[3], pkt_data[3]);
+	  end
+	endcase
   end
-  
-  // FIFO 2 write logic
+
   always_comb begin
-	fifo2_wr_en   = 1'b0;
-	fifo2_wr_data = '0;
-	
-	if (!fifo2_full) begin
-	  case (grant2)
-		2'd0: if (v0_valid && t0[2]) begin
-		  fifo2_wr_en   = 1'b1;
-		  fifo2_wr_data = pack_packet(s0, t0, d0);
-		end
-		2'd1: if (v1_valid && t1[2]) begin
-		  fifo2_wr_en   = 1'b1;
-		  fifo2_wr_data = pack_packet(s1, t1, d1);
-		end
-		2'd2: if (v2_valid && t2[2]) begin
-		  fifo2_wr_en   = 1'b1;
-		  fifo2_wr_data = pack_packet(s2, t2, d2);
-		end
-		2'd3: if (v3_valid && t3[2]) begin
-		  fifo2_wr_en   = 1'b1;
-		  fifo2_wr_data = pack_packet(s3, t3, d3);
-		end
-	  endcase
-	end
+	out2_valid = 1'b0;
+	out2_data  = '0;
+	unique case (grant2)
+	  2'd0: if (req2[0]) begin
+		out2_valid = 1'b1;
+		out2_data  = pack_packet(pkt_src[0], pkt_tgt[0], pkt_data[0]);
+	  end
+	  2'd1: if (req2[1]) begin
+		out2_valid = 1'b1;
+		out2_data  = pack_packet(pkt_src[1], pkt_tgt[1], pkt_data[1]);
+	  end
+	  2'd2: if (req2[2]) begin
+		out2_valid = 1'b1;
+		out2_data  = pack_packet(pkt_src[2], pkt_tgt[2], pkt_data[2]);
+	  end
+	  2'd3: if (req2[3]) begin
+		out2_valid = 1'b1;
+		out2_data  = pack_packet(pkt_src[3], pkt_tgt[3], pkt_data[3]);
+	  end
+	endcase
   end
-  
-  // FIFO 3 write logic
+
   always_comb begin
-	fifo3_wr_en   = 1'b0;
-	fifo3_wr_data = '0;
-	
-	if (!fifo3_full) begin
-	  case (grant3)
-		2'd0: if (v0_valid && t0[3]) begin
-		  fifo3_wr_en   = 1'b1;
-		  fifo3_wr_data = pack_packet(s0, t0, d0);
-		end
-		2'd1: if (v1_valid && t1[3]) begin
-		  fifo3_wr_en   = 1'b1;
-		  fifo3_wr_data = pack_packet(s1, t1, d1);
-		end
-		2'd2: if (v2_valid && t2[3]) begin
-		  fifo3_wr_en   = 1'b1;
-		  fifo3_wr_data = pack_packet(s2, t2, d2);
-		end
-		2'd3: if (v3_valid && t3[3]) begin
-		  fifo3_wr_en   = 1'b1;
-		  fifo3_wr_data = pack_packet(s3, t3, d3);
-		end
-	  endcase
-	end
+	out3_valid = 1'b0;
+	out3_data  = '0;
+	unique case (grant3)
+	  2'd0: if (req3[0]) begin
+		out3_valid = 1'b1;
+		out3_data  = pack_packet(pkt_src[0], pkt_tgt[0], pkt_data[0]);
+	  end
+	  2'd1: if (req3[1]) begin
+		out3_valid = 1'b1;
+		out3_data  = pack_packet(pkt_src[1], pkt_tgt[1], pkt_data[1]);
+	  end
+	  2'd2: if (req3[2]) begin
+		out3_valid = 1'b1;
+		out3_data  = pack_packet(pkt_src[2], pkt_tgt[2], pkt_data[2]);
+	  end
+	  2'd3: if (req3[3]) begin
+		out3_valid = 1'b1;
+		out3_data  = pack_packet(pkt_src[3], pkt_tgt[3], pkt_data[3]);
+	  end
+	endcase
   end
-  
+
   //-------------------------------------------------------------------------
-  // FIFO Read Logic (FIFO ? Output Port)
-  // When FIFO is not empty, pop one packet per cycle and drive output.
-  // valid_out is asserted for exactly one cycle per packet.
+  // Drive the actual port outputs from outX_valid/outX_data
   //-------------------------------------------------------------------------
-  
-  // Read enable: pop from FIFO whenever not empty
-  assign fifo0_rd_en = !fifo0_empty;
-  assign fifo1_rd_en = !fifo1_empty;
-  assign fifo2_rd_en = !fifo2_empty;
-  assign fifo3_rd_en = !fifo3_empty;
-  
-  // Port 0 output: drive from FIFO
+
+  // Port 0
   always_comb begin
-	if (!fifo0_empty) begin
-	  port0.valid_out  = 1'b1;
-	  port0.source_out = get_source(fifo0_rd_data);
-	  port0.target_out = get_target(fifo0_rd_data);
-	  port0.data_out   = get_data(fifo0_rd_data);
+	port0.valid_out = out0_valid;
+	if (out0_valid) begin
+	  port0.source_out = get_source(out0_data);
+	  port0.target_out = get_target(out0_data);
+	  port0.data_out   = get_data(out0_data);
 	end else begin
-	  port0.valid_out  = 1'b0;
 	  port0.source_out = 4'b0000;
 	  port0.target_out = 4'b0000;
-	  port0.data_out   = 8'h00;
+	  port0.data_out   = '0;
 	end
   end
-  
-  // Port 1 output: drive from FIFO
+
+  // Port 1
   always_comb begin
-	if (!fifo1_empty) begin
-	  port1.valid_out  = 1'b1;
-	  port1.source_out = get_source(fifo1_rd_data);
-	  port1.target_out = get_target(fifo1_rd_data);
-	  port1.data_out   = get_data(fifo1_rd_data);
+	port1.valid_out = out1_valid;
+	if (out1_valid) begin
+	  port1.source_out = get_source(out1_data);
+	  port1.target_out = get_target(out1_data);
+	  port1.data_out   = get_data(out1_data);
 	end else begin
-	  port1.valid_out  = 1'b0;
 	  port1.source_out = 4'b0000;
 	  port1.target_out = 4'b0000;
-	  port1.data_out   = 8'h00;
+	  port1.data_out   = '0;
 	end
   end
-  
-  // Port 2 output: drive from FIFO
+
+  // Port 2
   always_comb begin
-	if (!fifo2_empty) begin
-	  port2.valid_out  = 1'b1;
-	  port2.source_out = get_source(fifo2_rd_data);
-	  port2.target_out = get_target(fifo2_rd_data);
-	  port2.data_out   = get_data(fifo2_rd_data);
+	port2.valid_out = out2_valid;
+	if (out2_valid) begin
+	  port2.source_out = get_source(out2_data);
+	  port2.target_out = get_target(out2_data);
+	  port2.data_out   = get_data(out2_data);
 	end else begin
-	  port2.valid_out  = 1'b0;
 	  port2.source_out = 4'b0000;
 	  port2.target_out = 4'b0000;
-	  port2.data_out   = 8'h00;
+	  port2.data_out   = '0;
 	end
   end
-  
-  // Port 3 output: drive from FIFO
+
+  // Port 3
   always_comb begin
-	if (!fifo3_empty) begin
-	  port3.valid_out  = 1'b1;
-	  port3.source_out = get_source(fifo3_rd_data);
-	  port3.target_out = get_target(fifo3_rd_data);
-	  port3.data_out   = get_data(fifo3_rd_data);
+	port3.valid_out = out3_valid;
+	if (out3_valid) begin
+	  port3.source_out = get_source(out3_data);
+	  port3.target_out = get_target(out3_data);
+	  port3.data_out   = get_data(out3_data);
 	end else begin
-	  port3.valid_out  = 1'b0;
 	  port3.source_out = 4'b0000;
 	  port3.target_out = 4'b0000;
-	  port3.data_out   = 8'h00;
+	  port3.data_out   = '0;
 	end
   end
 
 endmodule
 
 //-----------------------------------------------------------------------------
-// Module: rr_arbiter
-// Description: Round-Robin Arbiter for fair arbitration among 4 requesters
+// Round-Robin Arbiter for 4 requesters
 //-----------------------------------------------------------------------------
 
 module rr_arbiter #(
   parameter int NUM_PORTS = 4
 )(
-  input  logic       clk,
-  input  logic       rst_n,
-  input  logic [3:0] req,
-  output logic [1:0] grant
+  input  logic                  clk,
+  input  logic                  rst_n,
+  input  logic [NUM_PORTS-1:0]  req,
+  output logic [1:0]            grant
 );
 
-  //-------------------------------------------------------------------------
-  // Internal Signals
-  //-------------------------------------------------------------------------
-  
-  // Priority pointer - indicates starting priority for round-robin
   logic [1:0] priority_ptr;
-  
-  // Rotated request based on priority
   logic [3:0] rotated_req;
-  
-  // Grant before rotation
   logic [1:0] pre_grant;
-  
-  // Any request active
-  logic any_req;
-  
-  //-------------------------------------------------------------------------
-  // Functions
-  //-------------------------------------------------------------------------
-  
-  // Function to rotate request vector based on priority pointer
-  function automatic logic [3:0] rotate_left(input logic [3:0] value, input logic [1:0] amount);
+  logic       any_req;
+
+  function automatic logic [3:0] rotate_left(input logic [3:0] value,
+											 input logic [1:0] amount);
 	logic [3:0] result;
 	case (amount)
 	  2'd0: result = value;
 	  2'd1: result = {value[2:0], value[3]};
 	  2'd2: result = {value[1:0], value[3:2]};
-	  2'd3: result = {value[0], value[3:1]};
+	  2'd3: result = {value[0],   value[3:1]};
 	endcase
 	return result;
   endfunction
-  
-  // Function to find first set bit (priority encoder)
+
   function automatic logic [1:0] find_first_set(input logic [3:0] value);
 	logic [1:0] result;
 	result = 2'd0;
@@ -616,164 +670,90 @@ module rr_arbiter #(
 	end
 	return result;
   endfunction
-  
-  //-------------------------------------------------------------------------
-  // Combinational Logic - Grant Calculation
-  //-------------------------------------------------------------------------
-  
+
   assign any_req = |req;
-  
+
   always_comb begin
-	// Rotate requests based on priority pointer
 	rotated_req = rotate_left(req, priority_ptr);
-	
-	// Find first active request in rotated order
-	pre_grant = find_first_set(rotated_req);
-	
-	// Convert back to original index (only grant if request exists)
+	pre_grant   = find_first_set(rotated_req);
+
 	if (any_req) begin
-	  // Use explicit wraparound instead of modulo to avoid synthesis issues
-	  case (pre_grant + priority_ptr)
+	  // Rotate grant back
+	  unique case (pre_grant + priority_ptr)
 		4'd0: grant = 2'd0;
 		4'd1: grant = 2'd1;
 		4'd2: grant = 2'd2;
 		4'd3: grant = 2'd3;
-		4'd4: grant = 2'd0;  // wrap
-		4'd5: grant = 2'd1;  // wrap
-		4'd6: grant = 2'd2;  // wrap
+		4'd4: grant = 2'd0;
+		4'd5: grant = 2'd1;
+		4'd6: grant = 2'd2;
 		default: grant = 2'd0;
 	  endcase
 	end else begin
-	  grant = 2'd0;  // Default to port 0 when no requests
+	  grant = 2'd0; // don't care when no req; we gate with req anyway
 	end
   end
-  
-  //-------------------------------------------------------------------------
-  // Sequential Logic - Update Priority Pointer
-  //-------------------------------------------------------------------------
-  
+
   always_ff @(posedge clk or negedge rst_n) begin
-	if (!rst_n) begin
+	if (!rst_n)
 	  priority_ptr <= 2'd0;
-	end else begin
-	  // Always advance pointer on every cycle for consistent rotation
-	  // This ensures fairness even when requests come and go
+	else
 	  priority_ptr <= (priority_ptr == 2'd3) ? 2'd0 : priority_ptr + 1'b1;
-	end
   end
 
 endmodule
 
 //-----------------------------------------------------------------------------
-// Module: sync_fifo
-// Description: Synchronous FIFO for buffering packets at each output port.
-//              Uses a circular buffer implementation with read/write pointers.
-//
-// Purpose: Prevents packet drops when multiple inputs target the same output.
-//          The arbiter grants one input per cycle, and the granted packet is
-//          pushed into the FIFO. Packets are then popped one at a time.
-//
-// Parameters:
-//   DATA_WIDTH - Width of data stored (default 16 for {src, tgt, data})
-//   DEPTH      - Number of entries in FIFO (default 8)
-//
-// Interface:
-//   wr_en/wr_data - Write interface (push)
-//   rd_en/rd_data - Read interface (pop)
-//   full/empty    - Status flags
+// Simple synchronous FIFO
 //-----------------------------------------------------------------------------
 
 module sync_fifo #(
   parameter int DATA_WIDTH = 16,
-  parameter int DEPTH = 8
+  parameter int DEPTH      = 8
 )(
-  input  logic                    clk,
-  input  logic                    rst_n,
-  
-  // Write interface
-  input  logic                    wr_en,
-  input  logic [DATA_WIDTH-1:0]   wr_data,
-  
-  // Read interface
-  input  logic                    rd_en,
-  output logic [DATA_WIDTH-1:0]   rd_data,
-  
-  // Status
-  output logic                    full,
-  output logic                    empty
+  input  logic                  clk,
+  input  logic                  rst_n,
+  input  logic                  wr_en,
+  input  logic [DATA_WIDTH-1:0] wr_data,
+  input  logic                  rd_en,
+  output logic [DATA_WIDTH-1:0] rd_data,
+  output logic                  full,
+  output logic                  empty
 );
 
-  //-------------------------------------------------------------------------
-  // Local Parameters
-  //-------------------------------------------------------------------------
-  
   localparam int PTR_WIDTH = $clog2(DEPTH);
-  
-  //-------------------------------------------------------------------------
-  // Internal Storage
-  //-------------------------------------------------------------------------
-  
-  // Memory array
-  logic [DATA_WIDTH-1:0] mem [0:DEPTH-1];
-  
-  // Pointers
-  logic [PTR_WIDTH-1:0] wr_ptr;
-  logic [PTR_WIDTH-1:0] rd_ptr;
-  
-  // Count of entries in FIFO
-  logic [PTR_WIDTH:0] count;  // One extra bit to hold DEPTH value
-  
-  //-------------------------------------------------------------------------
-  // Status Flags
-  //-------------------------------------------------------------------------
-  
-  assign empty = (count == 0);
-  assign full  = (count == DEPTH);
-  
-  //-------------------------------------------------------------------------
-  // Read Data Output
-  // Provide data at current read pointer (combinational read)
-  //-------------------------------------------------------------------------
-  
+
+  logic [DATA_WIDTH-1:0] mem   [0:DEPTH-1];
+  logic [PTR_WIDTH-1:0]  wr_ptr, rd_ptr;
+  logic [PTR_WIDTH:0]    count;
+
+  assign empty  = (count == 0);
+  assign full   = (count == DEPTH);
   assign rd_data = mem[rd_ptr];
-  
-  //-------------------------------------------------------------------------
-  // Sequential Logic - Pointer and Count Management
-  //-------------------------------------------------------------------------
-  
+
   always_ff @(posedge clk or negedge rst_n) begin
 	if (!rst_n) begin
-	  // Reset: clear pointers and count
 	  wr_ptr <= '0;
 	  rd_ptr <= '0;
 	  count  <= '0;
 	end else begin
-	  // Handle simultaneous read and write
-	  case ({wr_en && !full, rd_en && !empty})
+	  unique case ({wr_en && !full, rd_en && !empty})
 		2'b10: begin
-		  // Write only
 		  mem[wr_ptr] <= wr_data;
 		  wr_ptr      <= (wr_ptr == DEPTH-1) ? '0 : wr_ptr + 1'b1;
 		  count       <= count + 1'b1;
 		end
-		
 		2'b01: begin
-		  // Read only
 		  rd_ptr <= (rd_ptr == DEPTH-1) ? '0 : rd_ptr + 1'b1;
 		  count  <= count - 1'b1;
 		end
-		
 		2'b11: begin
-		  // Simultaneous read and write - count stays same
 		  mem[wr_ptr] <= wr_data;
 		  wr_ptr      <= (wr_ptr == DEPTH-1) ? '0 : wr_ptr + 1'b1;
 		  rd_ptr      <= (rd_ptr == DEPTH-1) ? '0 : rd_ptr + 1'b1;
-		  // count remains unchanged
+		  // count unchanged
 		end
-		
-		default: begin
-		  // No operation
-		end
+		default: ; // no op
 	  endcase
 	end
   end
