@@ -4,16 +4,8 @@
 //   - switch_port FSMs per input
 //   - per-input FIFOs (ingress buffering only)
 //   - per-output round-robin arbiters
-//   - direct (no-FIFO) outputs
-//
-// Multicast / broadcast support:
-//   A packet can have multiple target bits set. For each input i we track
-//   which outputs have already been served using pkt_written[i][j].
-//   The packet is considered "done" when all requested outputs were served,
-//   then we pop the next packet from that input's FIFO.
-//
-// Packet format in FIFOs and internal datapath:
-//   {source[3:0], target[3:0], data[7:0]} = 16 bits
+//   - direct outputs (no output FIFOs)
+//   - top-level FSM: SW_IDLE, SW_RECEIVE, SW_ROUTE, SW_TRANSMIT
 //-----------------------------------------------------------------------------
 
 module switch_4port #(
@@ -30,20 +22,27 @@ module switch_4port #(
 );
 
   //-------------------------------------------------------------------------
-  // Local Parameters
+  // Local parameters
   //-------------------------------------------------------------------------
 
-  // Source port encodings (one-hot)
-  localparam logic [3:0] PORT0_SOURCE = 4'b0001;
-  localparam logic [3:0] PORT1_SOURCE = 4'b0010;
-  localparam logic [3:0] PORT2_SOURCE = 4'b0100;
-  localparam logic [3:0] PORT3_SOURCE = 4'b1000;
-
-  // Broadcast target
+  // Broadcast target (all ports)
   localparam logic [3:0] BROADCAST_TARGET = 4'b1111;
 
-  // FIFO data width: {source[3:0], target[3:0], data[7:0]} = 16 bits
+  // Packet format: {source[3:0], target[3:0], data[7:0]} = 16 bits
   localparam int FIFO_DATA_WIDTH = 16;
+
+  //-------------------------------------------------------------------------
+  // Top-level switch fabric FSM
+  //-------------------------------------------------------------------------
+
+  typedef enum logic [1:0] {
+	SW_IDLE     = 2'b00,
+	SW_RECEIVE  = 2'b01,
+	SW_ROUTE    = 2'b10,
+	SW_TRANSMIT = 2'b11
+  } sw_state_t;
+
+  sw_state_t sw_state, sw_next_state;
 
   //-------------------------------------------------------------------------
   // Outputs of switch_port instances
@@ -78,10 +77,10 @@ module switch_4port #(
   // Latched packet state per input (one "current packet" per input)
   //-------------------------------------------------------------------------
 
-  logic [3:0] pkt_src    [NUM_PORTS]; // [input][3:0]
+  logic [3:0] pkt_src    [NUM_PORTS];
   logic [3:0] pkt_tgt    [NUM_PORTS];
   logic [7:0] pkt_data   [NUM_PORTS];
-  logic       pkt_valid  [NUM_PORTS]; // This input currently has an active pkt
+  logic       pkt_valid  [NUM_PORTS];
 
   // For each input i and output j, bit = 1 means "already sent to output j"
   logic [3:0] pkt_written     [NUM_PORTS];
@@ -92,7 +91,7 @@ module switch_4port #(
 
   //-------------------------------------------------------------------------
   // Request vectors and grants (per output)
-  // reqX[i] = input i requests output X
+  //   reqX[i] = input i requests output X
   //-------------------------------------------------------------------------
 
   logic [NUM_PORTS-1:0] req0, req1, req2, req3;
@@ -147,8 +146,6 @@ module switch_4port #(
 	input logic [3:0] src,
 	input logic [3:0] tgt
   );
-	// require original valid, a well-defined one-hot source, non-empty target,
-	// and either the target is broadcast or it does not include the source bit
 	return v_in
 		&& is_one_hot_local(src)
 		&& (|tgt)
@@ -156,8 +153,9 @@ module switch_4port #(
   endfunction
 
   //-------------------------------------------------------------------------
-  // Instantiate switch_port modules
-  //-------------------------------------------------------------------------
+  // Instantiate switch_port modules (one per input port)
+  //   (Use your updated switch_port implementation)
+//-------------------------------------------------------------------------
 
   switch_port #(.NUM_PORTS(NUM_PORTS)) sp0 (
 	.clk       (clk),
@@ -212,7 +210,7 @@ module switch_4port #(
   );
 
   //-------------------------------------------------------------------------
-  // Input FIFO instances
+  // Input FIFO instances (one per input port)
   //-------------------------------------------------------------------------
 
   sync_fifo #(
@@ -307,31 +305,87 @@ module switch_4port #(
   end
 
   //-------------------------------------------------------------------------
-  // Compute next pkt_written (set bits for outputs served this cycle)
+  // "Any work" flag for FSM
+  //-------------------------------------------------------------------------
+
+  logic any_work;
+
+  always_comb begin
+	any_work = !in_fifo0_empty || !in_fifo1_empty ||
+			   !in_fifo2_empty || !in_fifo3_empty ||
+			   pkt_valid[0] || pkt_valid[1] ||
+			   pkt_valid[2] || pkt_valid[3];
+  end
+
+  //-------------------------------------------------------------------------
+  // Switch fabric FSM: IDLE -> RECEIVE -> ROUTE -> TRANSMIT
   //-------------------------------------------------------------------------
 
   always_comb begin
-	// start with current value
+	sw_next_state = sw_state;
+
+	unique case (sw_state)
+	  SW_IDLE: begin
+		if (any_work)
+		  sw_next_state = SW_RECEIVE;
+	  end
+
+	  SW_RECEIVE: begin
+		sw_next_state = SW_ROUTE;
+	  end
+
+	  SW_ROUTE: begin
+		sw_next_state = SW_TRANSMIT;
+	  end
+
+	  SW_TRANSMIT: begin
+		if (any_work)
+		  sw_next_state = SW_RECEIVE;
+		else
+		  sw_next_state = SW_IDLE;
+	  end
+
+	  default: sw_next_state = SW_IDLE;
+	endcase
+  end
+
+  always_ff @(posedge clk or negedge rst_n) begin
+	if (!rst_n)
+	  sw_state <= SW_IDLE;
+	else
+	  sw_state <= sw_next_state;
+  end
+
+  //-------------------------------------------------------------------------
+  // Compute next pkt_written (set bits for outputs served this cycle)
+  // Only update written bits during SW_TRANSMIT.
+  //-------------------------------------------------------------------------
+
+  always_comb begin
 	for (int i = 0; i < NUM_PORTS; i++) begin
 	  pkt_written_next[i] = pkt_written[i];
 	end
 
-	// For each output j, if we actually send a packet (outj_valid),
-	// grantj is the input index for that packet, and bit j is now served.
-	if (out0_valid) pkt_written_next[grant0][0] = 1'b1;
-	if (out1_valid) pkt_written_next[grant1][1] = 1'b1;
-	if (out2_valid) pkt_written_next[grant2][2] = 1'b1;
-	if (out3_valid) pkt_written_next[grant3][3] = 1'b1;
+	if (sw_state == SW_TRANSMIT) begin
+	  if (out0_valid) pkt_written_next[grant0][0] = 1'b1;
+	  if (out1_valid) pkt_written_next[grant1][1] = 1'b1;
+	  if (out2_valid) pkt_written_next[grant2][2] = 1'b1;
+	  if (out3_valid) pkt_written_next[grant3][3] = 1'b1;
+	end
   end
 
   //-------------------------------------------------------------------------
   // Input FIFO read + packet latching
   //-------------------------------------------------------------------------
 
-  assign in_fifo0_rd_en = (!pkt_valid[0] || pkt_done[0]) && !in_fifo0_empty;
-  assign in_fifo1_rd_en = (!pkt_valid[1] || pkt_done[1]) && !in_fifo1_empty;
-  assign in_fifo2_rd_en = (!pkt_valid[2] || pkt_done[2]) && !in_fifo2_empty;
-  assign in_fifo3_rd_en = (!pkt_valid[3] || pkt_done[3]) && !in_fifo3_empty;
+  assign in_fifo0_rd_en = (sw_state == SW_RECEIVE) &&
+						  (!pkt_valid[0] || pkt_done[0]) && !in_fifo0_empty;
+  assign in_fifo1_rd_en = (sw_state == SW_RECEIVE) &&
+						  (!pkt_valid[1] || pkt_done[1]) && !in_fifo1_empty;
+  assign in_fifo2_rd_en = (sw_state == SW_RECEIVE) &&
+						  (!pkt_valid[2] || pkt_done[2]) && !in_fifo2_empty;
+  assign in_fifo3_rd_en = (sw_state == SW_RECEIVE) &&
+						  (!pkt_valid[3] || pkt_done[3]) && !in_fifo3_empty;
 
   always_ff @(posedge clk or negedge rst_n) begin
 	if (!rst_n) begin
@@ -345,13 +399,13 @@ module switch_4port #(
 	end else begin
 	  // Input 0
 	  if (!pkt_valid[0] || pkt_done[0]) begin
-		if (!in_fifo0_empty) begin
+		if (in_fifo0_rd_en) begin
 		  pkt_valid[0]   <= 1'b1;
 		  pkt_src[0]     <= get_source(in_fifo0_rd_data);
 		  pkt_tgt[0]     <= get_target(in_fifo0_rd_data);
 		  pkt_data[0]    <= get_data(in_fifo0_rd_data);
 		  pkt_written[0] <= 4'b0000;
-		end else begin
+		end else if (pkt_done[0]) begin
 		  pkt_valid[0]   <= 1'b0;
 		  pkt_written[0] <= 4'b0000;
 		end
@@ -361,13 +415,13 @@ module switch_4port #(
 
 	  // Input 1
 	  if (!pkt_valid[1] || pkt_done[1]) begin
-		if (!in_fifo1_empty) begin
+		if (in_fifo1_rd_en) begin
 		  pkt_valid[1]   <= 1'b1;
 		  pkt_src[1]     <= get_source(in_fifo1_rd_data);
 		  pkt_tgt[1]     <= get_target(in_fifo1_rd_data);
 		  pkt_data[1]    <= get_data(in_fifo1_rd_data);
 		  pkt_written[1] <= 4'b0000;
-		end else begin
+		end else if (pkt_done[1]) begin
 		  pkt_valid[1]   <= 1'b0;
 		  pkt_written[1] <= 4'b0000;
 		end
@@ -377,13 +431,13 @@ module switch_4port #(
 
 	  // Input 2
 	  if (!pkt_valid[2] || pkt_done[2]) begin
-		if (!in_fifo2_empty) begin
+		if (in_fifo2_rd_en) begin
 		  pkt_valid[2]   <= 1'b1;
 		  pkt_src[2]     <= get_source(in_fifo2_rd_data);
 		  pkt_tgt[2]     <= get_target(in_fifo2_rd_data);
 		  pkt_data[2]    <= get_data(in_fifo2_rd_data);
 		  pkt_written[2] <= 4'b0000;
-		end else begin
+		end else if (pkt_done[2]) begin
 		  pkt_valid[2]   <= 1'b0;
 		  pkt_written[2] <= 4'b0000;
 		end
@@ -393,13 +447,13 @@ module switch_4port #(
 
 	  // Input 3
 	  if (!pkt_valid[3] || pkt_done[3]) begin
-		if (!in_fifo3_empty) begin
+		if (in_fifo3_rd_en) begin
 		  pkt_valid[3]   <= 1'b1;
 		  pkt_src[3]     <= get_source(in_fifo3_rd_data);
 		  pkt_tgt[3]     <= get_target(in_fifo3_rd_data);
 		  pkt_data[3]    <= get_data(in_fifo3_rd_data);
 		  pkt_written[3] <= 4'b0000;
-		end else begin
+		end else if (pkt_done[3]) begin
 		  pkt_valid[3]   <= 1'b0;
 		  pkt_written[3] <= 4'b0000;
 		end
@@ -443,28 +497,28 @@ module switch_4port #(
   // Round-robin arbiters (per output)
   //-------------------------------------------------------------------------
 
-  rr_arbiter arb0 (
+  rr_arbiter #(.NUM_PORTS(NUM_PORTS)) arb0 (
 	.clk   (clk),
 	.rst_n (rst_n),
 	.req   (req0),
 	.grant (grant0)
   );
 
-  rr_arbiter arb1 (
+  rr_arbiter #(.NUM_PORTS(NUM_PORTS)) arb1 (
 	.clk   (clk),
 	.rst_n (rst_n),
 	.req   (req1),
 	.grant (grant1)
   );
 
-  rr_arbiter arb2 (
+  rr_arbiter #(.NUM_PORTS(NUM_PORTS)) arb2 (
 	.clk   (clk),
 	.rst_n (rst_n),
 	.req   (req2),
 	.grant (grant2)
   );
 
-  rr_arbiter arb3 (
+  rr_arbiter #(.NUM_PORTS(NUM_PORTS)) arb3 (
 	.clk   (clk),
 	.rst_n (rst_n),
 	.req   (req3),
@@ -573,8 +627,8 @@ module switch_4port #(
 
   // Port 0
   always_comb begin
-	port0.valid_out = out0_valid;
-	if (out0_valid) begin
+	port0.valid_out = (sw_state == SW_TRANSMIT) ? out0_valid : 1'b0;
+	if ((sw_state == SW_TRANSMIT) && out0_valid) begin
 	  port0.source_out = get_source(out0_data);
 	  port0.target_out = get_target(out0_data);
 	  port0.data_out   = get_data(out0_data);
@@ -587,8 +641,8 @@ module switch_4port #(
 
   // Port 1
   always_comb begin
-	port1.valid_out = out1_valid;
-	if (out1_valid) begin
+	port1.valid_out = (sw_state == SW_TRANSMIT) ? out1_valid : 1'b0;
+	if ((sw_state == SW_TRANSMIT) && out1_valid) begin
 	  port1.source_out = get_source(out1_data);
 	  port1.target_out = get_target(out1_data);
 	  port1.data_out   = get_data(out1_data);
@@ -601,8 +655,8 @@ module switch_4port #(
 
   // Port 2
   always_comb begin
-	port2.valid_out = out2_valid;
-	if (out2_valid) begin
+	port2.valid_out = (sw_state == SW_TRANSMIT) ? out2_valid : 1'b0;
+	if ((sw_state == SW_TRANSMIT) && out2_valid) begin
 	  port2.source_out = get_source(out2_data);
 	  port2.target_out = get_target(out2_data);
 	  port2.data_out   = get_data(out2_data);
@@ -615,8 +669,8 @@ module switch_4port #(
 
   // Port 3
   always_comb begin
-	port3.valid_out = out3_valid;
-	if (out3_valid) begin
+	port3.valid_out = (sw_state == SW_TRANSMIT) ? out3_valid : 1'b0;
+	if ((sw_state == SW_TRANSMIT) && out3_valid) begin
 	  port3.source_out = get_source(out3_data);
 	  port3.target_out = get_target(out3_data);
 	  port3.data_out   = get_data(out3_data);
@@ -630,7 +684,7 @@ module switch_4port #(
 endmodule
 
 //-----------------------------------------------------------------------------
-// Round-Robin Arbiter for 4 requesters
+// Round-Robin Arbiter for NUM_PORTS requesters
 //-----------------------------------------------------------------------------
 
 module rr_arbiter #(
@@ -639,32 +693,35 @@ module rr_arbiter #(
   input  logic                  clk,
   input  logic                  rst_n,
   input  logic [NUM_PORTS-1:0]  req,
-  output logic [1:0]            grant
+  output logic [$clog2(NUM_PORTS)-1:0] grant
 );
 
-  logic [1:0] priority_ptr;
-  logic [3:0] rotated_req;
-  logic [1:0] pre_grant;
-  logic       any_req;
+  localparam int GRANT_WIDTH = $clog2(NUM_PORTS);
 
-  function automatic logic [3:0] rotate_left(input logic [3:0] value,
-											 input logic [1:0] amount);
-	logic [3:0] result;
-	case (amount)
-	  2'd0: result = value;
-	  2'd1: result = {value[2:0], value[3]};
-	  2'd2: result = {value[1:0], value[3:2]};
-	  2'd3: result = {value[0],   value[3:1]};
-	endcase
+  logic [GRANT_WIDTH-1:0] priority_ptr;
+  logic [NUM_PORTS-1:0]   rotated_req;
+  logic [GRANT_WIDTH-1:0] pre_grant;
+  logic                   any_req;
+
+  // Rotate left
+  function automatic logic [NUM_PORTS-1:0] rotate_left(
+	input logic [NUM_PORTS-1:0] value,
+	input logic [GRANT_WIDTH-1:0] amount
+  );
+	logic [NUM_PORTS-1:0] result;
+	result = (value << amount) | (value >> (NUM_PORTS - amount));
 	return result;
   endfunction
 
-  function automatic logic [1:0] find_first_set(input logic [3:0] value);
-	logic [1:0] result;
-	result = 2'd0;
+  // First-set-bit encoder
+  function automatic logic [GRANT_WIDTH-1:0] find_first_set(
+	input logic [NUM_PORTS-1:0] value
+  );
+	logic [GRANT_WIDTH-1:0] result;
+	result = '0;
 	for (int i = 0; i < NUM_PORTS; i++) begin
 	  if (value[i]) begin
-		result = i[1:0];
+		result = i[GRANT_WIDTH-1:0];
 		break;
 	  end
 	end
@@ -678,27 +735,19 @@ module rr_arbiter #(
 	pre_grant   = find_first_set(rotated_req);
 
 	if (any_req) begin
-	  // Rotate grant back
-	  unique case (pre_grant + priority_ptr)
-		4'd0: grant = 2'd0;
-		4'd1: grant = 2'd1;
-		4'd2: grant = 2'd2;
-		4'd3: grant = 2'd3;
-		4'd4: grant = 2'd0;
-		4'd5: grant = 2'd1;
-		4'd6: grant = 2'd2;
-		default: grant = 2'd0;
-	  endcase
+	  grant = pre_grant + priority_ptr;
+	  if (grant >= NUM_PORTS)
+		grant = grant - NUM_PORTS;  // wrap
 	end else begin
-	  grant = 2'd0; // don't care when no req; we gate with req anyway
+	  grant = '0;
 	end
   end
 
   always_ff @(posedge clk or negedge rst_n) begin
 	if (!rst_n)
-	  priority_ptr <= 2'd0;
+	  priority_ptr <= '0;
 	else
-	  priority_ptr <= (priority_ptr == 2'd3) ? 2'd0 : priority_ptr + 1'b1;
+	  priority_ptr <= (priority_ptr == NUM_PORTS-1) ? '0 : priority_ptr + 1'b1;
   end
 
 endmodule
@@ -727,8 +776,8 @@ module sync_fifo #(
   logic [PTR_WIDTH-1:0]  wr_ptr, rd_ptr;
   logic [PTR_WIDTH:0]    count;
 
-  assign empty  = (count == 0);
-  assign full   = (count == DEPTH);
+  assign empty   = (count == 0);
+  assign full    = (count == DEPTH);
   assign rd_data = mem[rd_ptr];
 
   always_ff @(posedge clk or negedge rst_n) begin
