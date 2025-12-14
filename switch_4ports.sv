@@ -3,7 +3,7 @@
 // Description: 4-port packet switch fabric with:
 //   - switch_port FSMs per input
 //   - per-input FIFOs (ingress buffering only)
-//   - per-output round-robin arbiters
+//   - per-output round-robin arbitration (via rr_grant() function)
 //   - direct outputs (no output FIFOs)
 //   - top-level FSM: SW_IDLE, SW_RECEIVE, SW_ROUTE, SW_TRANSMIT
 //-----------------------------------------------------------------------------
@@ -25,11 +25,9 @@ module switch_4port #(
   // Local parameters
   //-------------------------------------------------------------------------
 
-  // Broadcast target (all ports)
   localparam logic [3:0] BROADCAST_TARGET = 4'b1111;
-
-  // Packet format: {source[3:0], target[3:0], data[7:0]} = 16 bits
-  localparam int FIFO_DATA_WIDTH = 16;
+  localparam int FIFO_DATA_WIDTH = 16;              // {src[3:0], tgt[3:0], data[7:0]}
+  localparam int GRANT_WIDTH     = $clog2(NUM_PORTS);
 
   //-------------------------------------------------------------------------
   // Top-level switch fabric FSM
@@ -94,8 +92,12 @@ module switch_4port #(
   //   reqX[i] = input i requests output X
   //-------------------------------------------------------------------------
 
-  logic [NUM_PORTS-1:0] req0, req1, req2, req3;
-  logic [1:0]           grant0, grant1, grant2, grant3;
+  logic [NUM_PORTS-1:0]  req0, req1, req2, req3;
+  logic [GRANT_WIDTH-1:0] grant0, grant1, grant2, grant3;
+
+  // Round-robin pointers and any_req flags per output
+  logic [GRANT_WIDTH-1:0] ptr0, ptr1, ptr2, ptr3;
+  logic any_req0, any_req1, any_req2, any_req3;
 
   //-------------------------------------------------------------------------
   // Output mux signals (no output FIFOs)
@@ -153,8 +155,35 @@ module switch_4port #(
   endfunction
 
   //-------------------------------------------------------------------------
+  // Round-robin grant function
+  //   - req   : one-hot-ish request vector
+  //   - start : pointer (who has highest priority this cycle)
+//   - returns index (0..NUM_PORTS-1) of the granted requester
+//   - If no req bits are set, returns start (caller can ignore when no req)
+//-------------------------------------------------------------------------
+
+  function automatic logic [GRANT_WIDTH-1:0] rr_grant(
+	input logic [NUM_PORTS-1:0]          req,
+	input logic [GRANT_WIDTH-1:0]        start
+  );
+	logic [GRANT_WIDTH-1:0] g;
+	logic                   found;
+	g     = start;
+	found = 1'b0;
+	for (int i = 0; i < NUM_PORTS; i++) begin
+	  int idx = start + i;
+	  if (idx >= NUM_PORTS) idx -= NUM_PORTS;
+	  if (!found && req[idx]) begin
+		g     = idx[GRANT_WIDTH-1:0];
+		found = 1'b1;
+	  end
+	end
+	return g;
+  endfunction
+
+  //-------------------------------------------------------------------------
   // Instantiate switch_port modules (one per input port)
-  //   (Use your updated switch_port implementation)
+  //   (Use your original switch_port implementation)
 //-------------------------------------------------------------------------
 
   switch_port #(.NUM_PORTS(NUM_PORTS)) sp0 (
@@ -275,26 +304,25 @@ module switch_4port #(
 
   logic v0_ok, v1_ok, v2_ok, v3_ok;
 
-  assign v0_ok = packet_is_valid(v0, s0, t0);
-  assign v1_ok = packet_is_valid(v1, s1, t1);
-  assign v2_ok = packet_is_valid(v2, s2, t2);
-  assign v3_ok = packet_is_valid(v3, s3, t3);
+  assign v0_ok = packet_is_valid(port0.valid_in, port0.source_in, port0.target_in);
+  assign v1_ok = packet_is_valid(port1.valid_in, port1.source_in, port1.target_in);
+  assign v2_ok = packet_is_valid(port2.valid_in, port2.source_in, port2.target_in);
+  assign v3_ok = packet_is_valid(port3.valid_in, port3.source_in, port3.target_in);
 
-  assign in_fifo0_wr_en   = v0_ok && !in_fifo0_full;
-  assign in_fifo0_wr_data = pack_packet(s0, t0, d0);
+  assign in_fifo0_wr_en   = port0.valid_in && v0_ok && !in_fifo0_full;
+  assign in_fifo0_wr_data = pack_packet(port0.source_in, port0.target_in, port0.data_in);
 
-  assign in_fifo1_wr_en   = v1_ok && !in_fifo1_full;
-  assign in_fifo1_wr_data = pack_packet(s1, t1, d1);
+  assign in_fifo1_wr_en   = port1.valid_in && v1_ok && !in_fifo1_full;
+  assign in_fifo1_wr_data = pack_packet(port1.source_in, port1.target_in, port1.data_in);
 
-  assign in_fifo2_wr_en   = v2_ok && !in_fifo2_full;
-  assign in_fifo2_wr_data = pack_packet(s2, t2, d2);
+  assign in_fifo2_wr_en   = port2.valid_in && v2_ok && !in_fifo2_full;
+  assign in_fifo2_wr_data = pack_packet(port2.source_in, port2.target_in, port2.data_in);
 
-  assign in_fifo3_wr_en   = v3_ok && !in_fifo3_full;
-  assign in_fifo3_wr_data = pack_packet(s3, t3, d3);
+  assign in_fifo3_wr_en   = port3.valid_in && v3_ok && !in_fifo3_full;
+  assign in_fifo3_wr_data = pack_packet(port3.source_in, port3.target_in, port3.data_in);
 
   //-------------------------------------------------------------------------
-  // Packet done condition per input:
-  // pkt_done[i] = pkt_valid && no remaining target bits that are not written
+  // Packet done condition per input
   //-------------------------------------------------------------------------
 
   always_comb begin
@@ -313,12 +341,12 @@ module switch_4port #(
   always_comb begin
 	any_work = !in_fifo0_empty || !in_fifo1_empty ||
 			   !in_fifo2_empty || !in_fifo3_empty ||
-			   pkt_valid[0] || pkt_valid[1] ||
-			   pkt_valid[2] || pkt_valid[3];
+			   pkt_valid[0]    || pkt_valid[1]    ||
+			   pkt_valid[2]    || pkt_valid[3];
   end
 
   //-------------------------------------------------------------------------
-  // Switch fabric FSM: IDLE -> RECEIVE -> ROUTE -> TRANSMIT
+  // Switch fabric FSM
   //-------------------------------------------------------------------------
 
   always_comb begin
@@ -357,8 +385,7 @@ module switch_4port #(
   end
 
   //-------------------------------------------------------------------------
-  // Compute next pkt_written (set bits for outputs served this cycle)
-  // Only update written bits during SW_TRANSMIT.
+  // Compute next pkt_written (mark outputs served in this cycle)
   //-------------------------------------------------------------------------
 
   always_comb begin
@@ -494,36 +521,47 @@ module switch_4port #(
   end
 
   //-------------------------------------------------------------------------
-  // Round-robin arbiters (per output)
+  // Round-robin grant calculation using rr_grant() function
   //-------------------------------------------------------------------------
 
-  rr_arbiter #(.NUM_PORTS(NUM_PORTS)) arb0 (
-	.clk   (clk),
-	.rst_n (rst_n),
-	.req   (req0),
-	.grant (grant0)
-  );
+  always_comb begin
+	any_req0 = |req0;
+	any_req1 = |req1;
+	any_req2 = |req2;
+	any_req3 = |req3;
 
-  rr_arbiter #(.NUM_PORTS(NUM_PORTS)) arb1 (
-	.clk   (clk),
-	.rst_n (rst_n),
-	.req   (req1),
-	.grant (grant1)
-  );
+	grant0 = rr_grant(req0, ptr0);
+	grant1 = rr_grant(req1, ptr1);
+	grant2 = rr_grant(req2, ptr2);
+	grant3 = rr_grant(req3, ptr3);
+  end
 
-  rr_arbiter #(.NUM_PORTS(NUM_PORTS)) arb2 (
-	.clk   (clk),
-	.rst_n (rst_n),
-	.req   (req2),
-	.grant (grant2)
-  );
-
-  rr_arbiter #(.NUM_PORTS(NUM_PORTS)) arb3 (
-	.clk   (clk),
-	.rst_n (rst_n),
-	.req   (req3),
-	.grant (grant3)
-  );
+  // Pointer update for all four arbiters
+  always_ff @(posedge clk or negedge rst_n) begin
+	if (!rst_n) begin
+	  ptr0 <= '0;
+	  ptr1 <= '0;
+	  ptr2 <= '0;
+	  ptr3 <= '0;
+	end else begin
+	  if (any_req0) begin
+		if (grant0 == NUM_PORTS-1) ptr0 <= '0;
+		else                       ptr0 <= grant0 + 1'b1;
+	  end
+	  if (any_req1) begin
+		if (grant1 == NUM_PORTS-1) ptr1 <= '0;
+		else                       ptr1 <= grant1 + 1'b1;
+	  end
+	  if (any_req2) begin
+		if (grant2 == NUM_PORTS-1) ptr2 <= '0;
+		else                       ptr2 <= grant2 + 1'b1;
+	  end
+	  if (any_req3) begin
+		if (grant3 == NUM_PORTS-1) ptr3 <= '0;
+		else                       ptr3 <= grant3 + 1'b1;
+	  end
+	end
+  end
 
   //-------------------------------------------------------------------------
   // Output muxes (no output FIFOs)
@@ -533,19 +571,19 @@ module switch_4port #(
 	out0_valid = 1'b0;
 	out0_data  = '0;
 	unique case (grant0)
-	  2'd0: if (req0[0]) begin
+	  0: if (req0[0]) begin
 		out0_valid = 1'b1;
 		out0_data  = pack_packet(pkt_src[0], pkt_tgt[0], pkt_data[0]);
 	  end
-	  2'd1: if (req0[1]) begin
+	  1: if (req0[1]) begin
 		out0_valid = 1'b1;
 		out0_data  = pack_packet(pkt_src[1], pkt_tgt[1], pkt_data[1]);
 	  end
-	  2'd2: if (req0[2]) begin
+	  2: if (req0[2]) begin
 		out0_valid = 1'b1;
 		out0_data  = pack_packet(pkt_src[2], pkt_tgt[2], pkt_data[2]);
 	  end
-	  2'd3: if (req0[3]) begin
+	  3: if (req0[3]) begin
 		out0_valid = 1'b1;
 		out0_data  = pack_packet(pkt_src[3], pkt_tgt[3], pkt_data[3]);
 	  end
@@ -556,19 +594,19 @@ module switch_4port #(
 	out1_valid = 1'b0;
 	out1_data  = '0;
 	unique case (grant1)
-	  2'd0: if (req1[0]) begin
+	  0: if (req1[0]) begin
 		out1_valid = 1'b1;
 		out1_data  = pack_packet(pkt_src[0], pkt_tgt[0], pkt_data[0]);
 	  end
-	  2'd1: if (req1[1]) begin
+	  1: if (req1[1]) begin
 		out1_valid = 1'b1;
 		out1_data  = pack_packet(pkt_src[1], pkt_tgt[1], pkt_data[1]);
 	  end
-	  2'd2: if (req1[2]) begin
+	  2: if (req1[2]) begin
 		out1_valid = 1'b1;
 		out1_data  = pack_packet(pkt_src[2], pkt_tgt[2], pkt_data[2]);
 	  end
-	  2'd3: if (req1[3]) begin
+	  3: if (req1[3]) begin
 		out1_valid = 1'b1;
 		out1_data  = pack_packet(pkt_src[3], pkt_tgt[3], pkt_data[3]);
 	  end
@@ -579,19 +617,19 @@ module switch_4port #(
 	out2_valid = 1'b0;
 	out2_data  = '0;
 	unique case (grant2)
-	  2'd0: if (req2[0]) begin
+	  0: if (req2[0]) begin
 		out2_valid = 1'b1;
 		out2_data  = pack_packet(pkt_src[0], pkt_tgt[0], pkt_data[0]);
 	  end
-	  2'd1: if (req2[1]) begin
+	  1: if (req2[1]) begin
 		out2_valid = 1'b1;
 		out2_data  = pack_packet(pkt_src[1], pkt_tgt[1], pkt_data[1]);
 	  end
-	  2'd2: if (req2[2]) begin
+	  2: if (req2[2]) begin
 		out2_valid = 1'b1;
 		out2_data  = pack_packet(pkt_src[2], pkt_tgt[2], pkt_data[2]);
 	  end
-	  2'd3: if (req2[3]) begin
+	  3: if (req2[3]) begin
 		out2_valid = 1'b1;
 		out2_data  = pack_packet(pkt_src[3], pkt_tgt[3], pkt_data[3]);
 	  end
@@ -602,19 +640,19 @@ module switch_4port #(
 	out3_valid = 1'b0;
 	out3_data  = '0;
 	unique case (grant3)
-	  2'd0: if (req3[0]) begin
+	  0: if (req3[0]) begin
 		out3_valid = 1'b1;
 		out3_data  = pack_packet(pkt_src[0], pkt_tgt[0], pkt_data[0]);
 	  end
-	  2'd1: if (req3[1]) begin
+	  1: if (req3[1]) begin
 		out3_valid = 1'b1;
 		out3_data  = pack_packet(pkt_src[1], pkt_tgt[1], pkt_data[1]);
 	  end
-	  2'd2: if (req3[2]) begin
+	  2: if (req3[2]) begin
 		out3_valid = 1'b1;
 		out3_data  = pack_packet(pkt_src[2], pkt_tgt[2], pkt_data[2]);
 	  end
-	  2'd3: if (req3[3]) begin
+	  3: if (req3[3]) begin
 		out3_valid = 1'b1;
 		out3_data  = pack_packet(pkt_src[3], pkt_tgt[3], pkt_data[3]);
 	  end
@@ -684,76 +722,7 @@ module switch_4port #(
 endmodule
 
 //-----------------------------------------------------------------------------
-// Round-Robin Arbiter for NUM_PORTS requesters
-//-----------------------------------------------------------------------------
-
-module rr_arbiter #(
-  parameter int NUM_PORTS = 4
-)(
-  input  logic                  clk,
-  input  logic                  rst_n,
-  input  logic [NUM_PORTS-1:0]  req,
-  output logic [$clog2(NUM_PORTS)-1:0] grant
-);
-
-  localparam int GRANT_WIDTH = $clog2(NUM_PORTS);
-
-  logic [GRANT_WIDTH-1:0] priority_ptr;
-  logic [NUM_PORTS-1:0]   rotated_req;
-  logic [GRANT_WIDTH-1:0] pre_grant;
-  logic                   any_req;
-
-  // Rotate left
-  function automatic logic [NUM_PORTS-1:0] rotate_left(
-	input logic [NUM_PORTS-1:0] value,
-	input logic [GRANT_WIDTH-1:0] amount
-  );
-	logic [NUM_PORTS-1:0] result;
-	result = (value << amount) | (value >> (NUM_PORTS - amount));
-	return result;
-  endfunction
-
-  // First-set-bit encoder
-  function automatic logic [GRANT_WIDTH-1:0] find_first_set(
-	input logic [NUM_PORTS-1:0] value
-  );
-	logic [GRANT_WIDTH-1:0] result;
-	result = '0;
-	for (int i = 0; i < NUM_PORTS; i++) begin
-	  if (value[i]) begin
-		result = i[GRANT_WIDTH-1:0];
-		break;
-	  end
-	end
-	return result;
-  endfunction
-
-  assign any_req = |req;
-
-  always_comb begin
-	rotated_req = rotate_left(req, priority_ptr);
-	pre_grant   = find_first_set(rotated_req);
-
-	if (any_req) begin
-	  grant = pre_grant + priority_ptr;
-	  if (grant >= NUM_PORTS)
-		grant = grant - NUM_PORTS;  // wrap
-	end else begin
-	  grant = '0;
-	end
-  end
-
-  always_ff @(posedge clk or negedge rst_n) begin
-	if (!rst_n)
-	  priority_ptr <= '0;
-	else
-	  priority_ptr <= (priority_ptr == NUM_PORTS-1) ? '0 : priority_ptr + 1'b1;
-  end
-
-endmodule
-
-//-----------------------------------------------------------------------------
-// Simple synchronous FIFO
+// Simple synchronous FIFO (unchanged)
 //-----------------------------------------------------------------------------
 
 module sync_fifo #(
