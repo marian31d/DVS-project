@@ -661,7 +661,7 @@ module switch_4port #(
   // Port 0
   always_comb begin
 	port0.valid_out = (sw_state == SW_TRANSMIT) ? out0_valid : 1'b0;
-	if ((sw_state == SW_TRANSMIT) && out0_valid) begin
+	if ((sw_state == SW_TRANSMIT)) begin
 	  port0.source_out = get_source(out0_data);
 	  port0.target_out = get_target(out0_data);
 	  port0.data_out   = get_data(out0_data);
@@ -675,7 +675,7 @@ module switch_4port #(
   // Port 1
   always_comb begin
 	port1.valid_out = (sw_state == SW_TRANSMIT) ? out1_valid : 1'b0;
-	if ((sw_state == SW_TRANSMIT) && out1_valid) begin
+	if ((sw_state == SW_TRANSMIT)) begin
 	  port1.source_out = get_source(out1_data);
 	  port1.target_out = get_target(out1_data);
 	  port1.data_out   = get_data(out1_data);
@@ -689,7 +689,7 @@ module switch_4port #(
   // Port 2
   always_comb begin
 	port2.valid_out = (sw_state == SW_TRANSMIT) ? out2_valid : 1'b0;
-	if ((sw_state == SW_TRANSMIT) && out2_valid) begin
+	if ((sw_state == SW_TRANSMIT)) begin
 	  port2.source_out = get_source(out2_data);
 	  port2.target_out = get_target(out2_data);
 	  port2.data_out   = get_data(out2_data);
@@ -703,7 +703,7 @@ module switch_4port #(
   // Port 3
   always_comb begin
 	port3.valid_out = (sw_state == SW_TRANSMIT) ? out3_valid : 1'b0;
-	if ((sw_state == SW_TRANSMIT) && out3_valid) begin
+	if ((sw_state == SW_TRANSMIT)) begin
 	  port3.source_out = get_source(out3_data);
 	  port3.target_out = get_target(out3_data);
 	  port3.data_out   = get_data(out3_data);
