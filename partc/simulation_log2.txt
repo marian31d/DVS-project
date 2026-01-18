@@ -1,0 +1,213 @@
+vcs \
+/data/synopsys/lib/SAED32_EDK/lib/stdcell_hvt/verilog/saed32nm_hvt.v \
+/data/synopsys/lib/SAED32_EDK/lib/stdcell_lvt/verilog/saed32nm_lvt.v \
+/data/synopsys/lib/SAED32_EDK/lib/stdcell_rvt/verilog/saed32nm.v \
+-f build.cud -sverilog -kdb +vcs+fsdbon+lint=TFIPC-L -sdf typ:vc_test.dut.u_netlist:switch1.sdf
+
+Warning-[LNX_OS_VERUN] Unsupported Linux version
+  Linux version 'Rocky Linux release 8.10 (Green Obsidian)' is not supported 
+  on 'x86_64' officially, assuming linux compatibility by default. Set 
+  VCS_ARCH_OVERRIDE to linux or suse32 to override.
+  Please refer to release notes for information on supported platforms.
+
+                         Chronologic VCS (TM)
+        Version X-2025.06-1_Full64 -- Sun Jan 18 16:37:43 2026
+
+                    Copyright (c) 1991 - 2025 Synopsys, Inc.
+   This software and the associated documentation are proprietary to Synopsys,
+ Inc. This software may only be used in accordance with the terms and conditions
+ of a written license agreement with Synopsys, Inc. All other use, reproduction,
+   or distribution of this software is strictly prohibited.  Licensed Products
+     communicate with Synopsys servers for the purpose of providing software
+    updates, detecting software piracy and verifying that customers are using
+    Licensed Products in conformity with the applicable License Key for such
+  Licensed Products. Synopsys will use information gathered in connection with
+    this process to deliver software updates and pursue software pirates and
+                                   infringers.
+
+ Inclusivity & Diversity - Visit SolvNetPlus to read the "Synopsys Statement on
+            Inclusivity and Diversity" (Refer to article 000036315 at
+                        https://solvnetplus.synopsys.com)
+
+The design hasn't changed and need not be recompiled. 
+If you really want to, delete file simv.daidir/.vcs.timestamp and
+run VCS again.
+
+qrsh -V -cwd -b y -q normal ./simv  2>&1 | tee log
+Unloading SNPSLIC/base <aL>
+  Unloading dependent: FC/V-2023.12-SP3
+Loading ICV/X-2025.06-SP2
+  ERROR: Module cannot be loaded due to a conflict.
+    HINT: Might try "module unload ICV/X-2025.06-SP1-3" first.
+Info: [VCS_SAVE_RESTORE_INFO] ASLR (Address Space Layout Randomization) is detected on the machine. To enable $save functionality, ASLR will be switched off and simv re-executed.
+Please use '-no_save' simv switch to avoid re-execution or '-suppress=ASLR_DETECTED_INFO' to suppress this message.
+Chronologic VCS simulator copyright 1991-2025
+Contains Synopsys proprietary information.
+Compiler version X-2025.06-1_Full64; Runtime version X-2025.06-1_Full64;  Jan 18 16:37 2026
+Doing SDF annotation ...... Done
+*Verdi* Loading libsscore_vcs202506.so
+FSDB Dumper for VCS, Release Verdi_X-2025.06-1, Linux x86_64/64bit, 07/19/2025
+(C) 1996 - 2025 by Synopsys, Inc.
+*Verdi* ERROR: The #1 argument "+lint=TFIPC-L" is invalid
+*Verdi* ERROR: Failed to dump because the specified instance or option is not correct
+*Verdi* ERROR: Syntax - $fsdbDumpvars([depth,][instance][,option]*);	: Unknown source file(0)
+
+
+############################################################
+#                                                          #
+#     Verification Component Test                          #
+#                                                          #
+############################################################
+
+
+[45000] Reset deasserted
+[75000] === BUILD PHASE ===
+Building Packet VC for port 0
+Building agent (port 0)
+Building sequencer for port 0
+Building driver for port 0
+Building monitor for port 0
+Building checker for port 0
+Building Packet VC for port 1
+Building agent (port 1)
+Building sequencer for port 1
+Building driver for port 1
+Building monitor for port 1
+Building checker for port 1
+Building Packet VC for port 2
+Building agent (port 2)
+Building sequencer for port 2
+Building driver for port 2
+Building monitor for port 2
+Building checker for port 2
+Building Packet VC for port 3
+Building agent (port 3)
+Building sequencer for port 3
+Building driver for port 3
+Building monitor for port 3
+Building checker for port 3
+[75000] === CONNECT PHASE ===
+Connecting Packet VC (port 0)
+Connecting agent (port 0)
+Sequencer connected
+Driver connected (port 0)
+Monitor connected (port 0)
+Checker connected
+Connecting Packet VC (port 1)
+Connecting agent (port 1)
+Sequencer connected
+Driver connected (port 1)
+Monitor connected (port 1)
+Checker connected
+Connecting Packet VC (port 2)
+Connecting agent (port 2)
+Sequencer connected
+Driver connected (port 2)
+Monitor connected (port 2)
+Checker connected
+Connecting Packet VC (port 3)
+Connecting agent (port 3)
+Sequencer connected
+Driver connected (port 3)
+Monitor connected (port 3)
+Checker connected
+[75000] === RUN PHASE ===
+Info: "packet_vc.sv", 34: $unit::\packet_vc::run : at time 75000 ps
+Packet VC starting (port 0)
+Agent running (port 0)
+Info: "packet_vc.sv", 34: $unit::\packet_vc::run : at time 75000 ps
+Packet VC starting (port 1)
+Agent running (port 1)
+Info: "packet_vc.sv", 34: $unit::\packet_vc::run : at time 75000 ps
+Packet VC starting (port 2)
+Agent running (port 2)
+Info: "packet_vc.sv", 34: $unit::\packet_vc::run : at time 75000 ps
+Packet VC starting (port 3)
+Agent running (port 3)
+Sequencer starting (port 0), will generate 5 packets
+Driver starting (port 0)
+Monitor starting (port 0)
+Sequencer starting (port 1), will generate 0 packets
+Sequencer done (port 1). Generated=0
+Driver starting (port 1)
+Monitor starting (port 1)
+Sequencer starting (port 2), will generate 0 packets
+Sequencer done (port 2). Generated=0
+Driver starting (port 2)
+Monitor starting (port 2)
+Sequencer starting (port 3), will generate 0 packets
+Sequencer done (port 3). Generated=0
+Driver starting (port 3)
+Monitor starting (port 3)
+[125000] OUT v0=0 v1=1 v2=1 v3=0 | s0=0000 t0=0000 d0=0 | s1=0001 t1=0110 d1=b2 | s2=0001 t2=0110 d2=b2 | s3=0000 t3=0000 d3=0
+[125000] MON1 valid_out src=0001 tgt=0110 data=b2
+[125000] MON2 valid_out src=0001 tgt=0110 data=b2
+[155000] OUT v0=1 v1=0 v2=0 v3=0 | s0=0001 t0=0001 d0=4e | s1=0000 t1=0000 d1=0 | s2=0000 t2=0000 d2=0 | s3=0000 t3=0000 d3=0
+[155000] MON0 valid_out src=0001 tgt=0001 data=4e
+[185000] OUT v0=0 v1=1 v2=1 v3=1 | s0=0000 t0=0000 d0=0 | s1=0001 t1=1110 d1=9f | s2=0001 t2=1110 d2=9f | s3=0001 t3=1110 d3=9f
+[185000] MON1 valid_out src=0001 tgt=1110 data=9f
+[185000] MON2 valid_out src=0001 tgt=1110 data=9f
+[185000] MON3 valid_out src=0001 tgt=1110 data=9f
+[205000] OUT v0=0 v1=0 v2=1 v3=0 | s0=0000 t0=0000 d0=0 | s1=0000 t1=0000 d1=0 | s2=0001 t2=0100 d2=93 | s3=0000 t3=0000 d3=0
+[205000] MON2 valid_out src=0001 tgt=0100 data=93
+Sequencer done (port 0). Generated=5
+[225000] OUT v0=0 v1=0 v2=1 v3=0 | s0=0000 t0=0000 d0=0 | s1=0000 t1=0000 d1=0 | s2=0001 t2=0100 d2=fb | s3=0000 t3=0000 d3=0
+[225000] MON2 valid_out src=0001 tgt=0100 data=fb
+Info: "packet_vc.sv", 60: $unit::\packet_vc::run : at time 375000 ps
+Packet VC done (port 1)
+Info: "packet_vc.sv", 60: $unit::\packet_vc::run : at time 375000 ps
+Packet VC done (port 2)
+Info: "packet_vc.sv", 60: $unit::\packet_vc::run : at time 375000 ps
+Packet VC done (port 3)
+Info: "packet_vc.sv", 60: $unit::\packet_vc::run : at time 505000 ps
+Packet VC done (port 0)
+
+[1505000] === CHECK PHASE ===
+Checking 1 received vs 1 expected
+Checking 2 received vs 2 expected
+Checking 4 received vs 4 expected
+Checking 1 received vs 1 expected
+
+[1505000] === REPORT PHASE ===
+=== Packet VC Port 0 Report ===
+=== Agent Report (port 0) ===
+Sequencer generated 5 packets
+Packets driven: 5
+Monitor observed 1 packets
+Port 0: Matched=1 Dropped=0 Unexpected=0 PASSED
+=== Packet VC Port 1 Report ===
+=== Agent Report (port 1) ===
+Sequencer generated 0 packets
+Packets driven: 0
+Monitor observed 2 packets
+Port 1: Matched=2 Dropped=0 Unexpected=0 PASSED
+=== Packet VC Port 2 Report ===
+=== Agent Report (port 2) ===
+Sequencer generated 0 packets
+Packets driven: 0
+Monitor observed 4 packets
+Port 2: Matched=4 Dropped=0 Unexpected=0 PASSED
+=== Packet VC Port 3 Report ===
+=== Agent Report (port 3) ===
+Sequencer generated 0 packets
+Packets driven: 0
+Monitor observed 1 packets
+Port 3: Matched=1 Dropped=0 Unexpected=0 PASSED
+
+*** TEST PASSED ***
+
+
+
+############################################################
+#                                                          #
+#              *** VC TEST COMPLETE ***                    #
+#                                                          #
+############################################################
+
+
+$finish called from file "vc_test.sv", line 214.
+$finish at simulation time              1555000
+           V C S   S i m u l a t i o n   R e p o r t 
+Time: 1555000 ps
+CPU Time:      0.910 seconds;       Data structure size:  13.6Mb
+Sun Jan 18 16:37:46 2026
